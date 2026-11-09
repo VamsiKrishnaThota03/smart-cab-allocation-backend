@@ -13,55 +13,61 @@ The REST API for the Smart Cab Allocation app. It handles user authentication, c
 
 ## Overview
 
-This is an Express server backed by MongoDB (Mongoose). Users register and log in to get a JWT, which the client sends in the `auth-token` header. Cabs are stored with their coordinates, town, pincode and a booking status. Booking a cab marks it `Not Available` and links it to the user. Ending a trip moves the cab to the drop-off coordinates and makes it `Available` again. An admin, identified by the `isAdmin` flag in the token, can list users and delete non-admin users.
+This is an Express server backed by MongoDB (Mongoose). Users register and log in to get a JWT, which the client sends in the `auth-token` header. Cabs are stored with their coordinates, town, pincode and a booking status. Booking a cab marks it `Not Available` and links it to the user. Ending a trip moves the cab to the drop-off coordinates and makes it `Available` again. Admins (users whose email is in `ADMIN_EMAILS` when they register) add cabs, list users and delete non-admin users.
 
 The deployed frontend calls this API at `https://smart-cab-allocation-backend.onrender.com`.
 
 ## Features
 
-- **Registration and login:** passwords hashed with `bcryptjs`, input validated with `express-validator`, and JWTs that expire after 1 hour
-- **Admin role:** a user who registers with the configured admin email gets `isAdmin: true`
-- **Cab management:** add a cab (name, phone, email, latitude/longitude, town, pincode) and list available cabs
-- **Booking lifecycle:** book an available cab, then end the trip to update the cab's location and free it up
+- **Registration and login:** passwords hashed with `bcryptjs`, input validated with `express-validator`, JWTs that expire after 1 hour
+- **Admin role:** granted only to the emails in `ADMIN_EMAILS`; admin routes check the signed `isAdmin` claim
+- **Cab management:** admins add cabs; anyone can list available cabs
+- **Booking lifecycle:** atomic booking (two riders cannot book the same cab), one active booking per rider, `GET /api/cabs/myCab` for the current booking, and ending a trip only by the rider who booked it (or an admin)
 - **Admin user management:** list users (passwords excluded) and delete non-admin users
-- **Google Maps proxy:** nearby places, place details and reverse geocoding (returns the postal code)
+- **Google Maps proxy:** nearby places, place details and reverse geocoding (`{ postalCode, town }`), for logged-in users only, with validated coordinates
 - **Socket.IO relay:** a `cabLocationUpdate` event is re-broadcast to all connected clients
+- JSON error responses, a health route, and a configurable CORS allow list
 
 ## Tech stack
 
 | Area | Tools |
 | --- | --- |
-| Runtime | Node.js, Express 4 |
+| Runtime | Node.js 18+, Express 4 |
 | Database | MongoDB with Mongoose 8 |
 | Auth | `jsonwebtoken`, `bcryptjs`, `express-validator` |
 | Realtime | Socket.IO 4 |
 | External APIs | Google Maps Places / Geocoding (via `axios`) |
 | Config | `dotenv`, `cors` |
+| Tests | `node:test` |
 
 ## Project structure
 
 ```
 smart-cab-allocation-backend/
-├── server.js              # Express + Socket.IO entry point (port 5001 by default)
-├── config/db.js           # MongoDB connection
+├── server.js              # checks config, connects MongoDB, starts HTTP + Socket.IO
+├── app.js                 # Express app: CORS, routes, 404 and error handlers
+├── config/
+│   ├── env.js             # requireEnv / listEnv helpers
+│   └── db.js              # MongoDB connection (MONGO_URI)
 ├── controllers/
 │   ├── authController.js  # register, login, getUser
-│   ├── adminController.js # list / delete users
-│   └── cabController.js   # (not mounted by any route)
+│   └── adminController.js # list / delete users
 ├── middleware/
 │   ├── fetchUser.js       # verifies the JWT from the auth-token header
-│   └── isAdmin.js         # verifies the JWT and requires isAdmin
+│   ├── isAdmin.js         # requires the isAdmin claim (after fetchUser)
+│   └── validate.js        # express-validator error handler
 ├── models/                # User, Cab
-└── routes/                # authRoutes, cabRoutes, adminRoutes, placesRoute
+├── routes/                # authRoutes, cabRoutes, adminRoutes, placesRoute
+└── test/api.test.js       # smoke tests (no database needed)
 ```
 
 ## Getting started
 
 ### Prerequisites
 
-- Node.js and npm
-- A MongoDB database (local or MongoDB Atlas)
-- A Google Maps API key with the Places and Geocoding APIs enabled
+- Node.js 18 or newer and npm
+- MongoDB (local or MongoDB Atlas)
+- Optional: a Google Maps API key with the Places and Geocoding APIs enabled
 
 ### Install and run
 
@@ -69,50 +75,58 @@ smart-cab-allocation-backend/
 git clone https://github.com/VamsiKrishnaThota03/smart-cab-allocation-backend.git
 cd smart-cab-allocation-backend
 npm install
-node server.js        # or: npx nodemon server.js
+cp .env.example .env     # then fill in the values
+npm run dev              # nodemon; or: npm start
+npm test                 # smoke tests
 ```
 
 The server listens on `PORT` (default `5001`).
 
 ### Environment variables
 
-Create a `.env` file in the project root:
+| Variable | Required | Description |
+| --- | --- | --- |
+| `MONGO_URI` | Yes | MongoDB connection string, for example `mongodb://127.0.0.1:27017/smart-cab` |
+| `JWT_SECRET` | Yes | Long random string used to sign JWTs |
+| `GOOGLE_MAPS_API_KEY` | For geocoding | Server-side key with the Geocoding and Places APIs enabled. Without it the `/api/geocode`, `/api/places` and `/api/place-details` routes return 503 and the "nearest cabs" list falls back to the 5 km radius only |
+| `ADMIN_EMAILS` | No | Comma-separated emails that get admin rights when they register |
+| `CORS_ORIGIN` | No | Comma-separated allowed browser origins, for example `https://smart-cab-allocation-frontend.vercel.app`. When empty, every origin is allowed (fine for local development) |
+| `PORT` | No | API port, default `5001` |
 
-| Variable | Description |
-| --- | --- |
-| `PORT` | Port for the HTTP server (optional, default `5001`) |
-| `api` | Google Maps API key used by the `/api/places`, `/api/place-details` and `/api/geocode` routes |
-| `JWT_SECRET` | Secret for signing JWTs (see the note below) |
-
-```env
-PORT=5001
-api=<your-google-maps-api-key>
-JWT_SECRET=<a-long-random-secret>
-```
-
-> **Note:** in the current code, the MongoDB connection string (`config/db.js`) and the JWT secret (`controllers/authController.js` and `middleware/*.js`) are hard-coded rather than read from the environment. To use your own database and secret, change those files to read from `process.env`, for example `process.env.MONGO_URI` and `process.env.JWT_SECRET`.
+The server exits with a clear message if `MONGO_URI` or `JWT_SECRET` is missing.
 
 ## API
 
-Protected routes need the JWT in an `auth-token` request header.
+Protected routes need the JWT in an `auth-token` header. Errors are returned as `{ "message": "..." }`.
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| POST | `/api/auth/register` | - | Register a user (`name`, `email`, `password`) and return a JWT |
+| GET | `/` | - | Health check |
+| POST | `/api/auth/register` | - | Register (`name`, `email`, `password`) and return `{ token, isAdmin }` |
 | POST | `/api/auth/login` | - | Log in and return `{ token, isAdmin }` |
-| POST | `/api/auth/getuser` | User | Get the logged-in user's profile |
-| POST | `/api/cabs/addCab` | User | Add a cab (`name`, `phone`, `email`, `latitude`, `longitude`, `pincode`, `town`) |
-| GET | `/api/cabs/availableCabs` | - | List cabs whose status is `Available` |
-| POST | `/api/cabs/bookCab/:cabId` | User | Book an available cab for the current user |
-| POST | `/api/cabs/endTrip/:cabId` | - | End a trip: move the cab to `destinationLat` / `destinationLng` and make it available |
-| GET | `/api/admin/users` | Admin | List all users (passwords excluded) |
+| GET / POST | `/api/auth/getuser` | User | Current user's profile |
+| POST | `/api/cabs/addCab` | Admin | Add a cab (`name`, `phone`, `email`, `latitude`, `longitude`, optional `town`, `pincode`) |
+| GET | `/api/cabs/availableCabs` | - | List available cabs (`name`, `latitude`, `longitude`) |
+| GET | `/api/cabs/myCab` | User | The cab the current user has booked, or `{ cab: null }` |
+| POST | `/api/cabs/bookCab/:cabId` | User | Book an available cab (one active booking per user) |
+| POST | `/api/cabs/endTrip/:cabId` | Booking user or admin | End the trip; with `destinationLat` / `destinationLng` the cab moves to the drop-off point |
+| GET | `/api/admin/users` | Admin | List users (passwords excluded) |
 | DELETE | `/api/admin/users/:id` | Admin | Delete a non-admin user |
-| GET | `/api/places?lat=&lng=` | - | Proxy to the Google Places Nearby Search API |
-| GET | `/api/place-details?placeId=` | - | Proxy to the Google Place Details API |
-| GET | `/api/geocode?lat=&lng=` | - | Reverse geocode coordinates and return `{ postalCode }` |
+| GET | `/api/places?lat=&lng=` | User | Google Places Nearby Search proxy |
+| GET | `/api/place-details?placeId=` | User | Google Place Details proxy |
+| GET | `/api/geocode?lat=&lng=` | User | Reverse geocode and return `{ postalCode, town }` |
 
-### Socket.IO
+The server also runs a Socket.IO relay that re-broadcasts `cabLocationUpdate` events to every client. The current frontend does not use it; the trip movement is animated in the browser.
 
-| Event | Direction | Purpose |
-| --- | --- | --- |
-| `cabLocationUpdate` | client to server to all clients | Re-broadcasts a cab location payload to every connected client |
+## Deployment notes (Render)
+
+- Set `MONGO_URI`, `JWT_SECRET`, `GOOGLE_MAPS_API_KEY`, `ADMIN_EMAILS` and `CORS_ORIGIN` (the Vercel frontend URL). The start command is `npm start`.
+- Earlier commits contained a MongoDB password, a JWT secret and a Google Maps key (`.env` and `config/db.js`). They are gone from the current code but still in the git history, so rotate all three.
+- Changing `JWT_SECRET` logs everyone out once. Existing admin accounts keep their `isAdmin` flag in the database.
+
+## Known limitations
+
+- No rate limiting on login or registration.
+- `GET /api/cabs/availableCabs` is public by design (the map shows cabs before booking).
+- The Socket.IO relay is unauthenticated and not used by the current frontend.
+- `npm audit` reports a moderate issue in `nodemon`'s `minimatch` (development only).
