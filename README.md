@@ -1,3 +1,5 @@
+> **📦 Archived:** this repo is kept for history. Active development continues in the combined repository **[smart-cab-allocation](https://github.com/VamsiKrishnaThota03/smart-cab-allocation)**, which contains the same frontend and backend code.
+
 # Smart Cab Allocation - Backend
 
 The REST API for the Smart Cab Allocation app. It handles user authentication, cab inventory and bookings, admin user management, and proxies the Google Maps Places and Geocoding APIs.
